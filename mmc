@@ -1,10 +1,12 @@
 /*
- * mm-naive.c - The fastest, least memory-efficient malloc package.
+ * mm.c - The fastest, least memory-efficient malloc package.
  * 
  * In this naive approach, a block is allocated by simply incrementing
  * the brk pointer.  A block is pure payload. There are no headers or
  * footers.  Blocks are never coalesced or reused. Realloc is
  * implemented directly using mm_malloc and mm_free.
+ *
+ * Attempt 1, 11/21: implicit free list with immediate coalescing
  *
  * NOTE TO STUDENTS: Replace this header comment with your own header
  * comment that gives a high level description of your solution.
@@ -41,31 +43,135 @@ team_t team = {
 /* rounds up to the nearest multiple of ALIGNMENT */
 #define ALIGN(size) (((size) + (ALIGNMENT-1)) & ~0x7)
 
-
 #define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
+
+/* Basic constants and macros */
+#define WSIZE 4 		// Size of header/footer = 4 bytes
+#define DSIZE 8 		// Size of double word
+#define CHUNKSIZE (1<<12)	// Extend heap by 1024 
+
+#define MAX(x, y)  ((x) > (y)? (x) : (y))
+
+/* Pack a size and allocated bit into a word */
+#define PACK(size, alloc) ((size) | (alloc))
+
+/* Read and write a word at address p */
+#define GET(p) 		(*(unsigned int *)(p))
+#define PUT(p, val) 	(*(unsigned int *)(p)) = (val)
+
+/* Read block size and is-allocated from address p */
+#define GET_SIZE(p) 	(GET(p) & ~0x7)
+#define GET_ALLOC(p) 	(GET(p) & 0x1)
+
+/* Given a block pointer ptr, compute address of its header and footer */
+#define HDRP(ptr) 	((char *)(ptr) - WSIZE)
+#define FTRP(ptr) 	((char *)(ptr) + GET_SIZE(HDRP(ptr) - DSIZE))
+
+/* Given block pointer ptr, compute address of next/prev blocks */
+#define NEXT_BLKP(ptr) 	((char *)(ptr) + GET_SIZE(((char *)(ptr) - WSIZE)))
+#define PREV_BLKP(ptr) 	((char *)(ptr) - GET_SIZE(((char *)(ptr) - DSIZE)))
+
+/* Function declarations */
+int mm_init(void);
+static void* extend_heap(size_t words);
+void *mem_sbrk(int incr);
+void* mm_malloc(size_t size);
+void mm_free(void *ptr);
+static void* coalesce(void *ptr);
+void* mm_realloc(void *ptr, size_t size);
+
+/* Private global variables */
+static char *heap_listp; 	// Points to first byte in heap
+static char *mem_brk; 		// Points to last byte of heap +1
+static char *mem_max_addr; 	// Max legal heap addr +1
 
 /* 
  * mm_init - initialize the malloc package.
+ * Returns -1 if init is unsuccessful, 0 otherwise
  */
 int mm_init(void)
 {
-    // allocate initial heap area
 
-    if (error) {
+    if ((heap_listp = mem_sbrk(4*WSIZE)) == (void *)-1)
       return -1;
-    }
+    PUT(heap_listp, 0);				 // Padding to double-word boundary
+    PUT(heap_listp + (1*WSIZE), PACK(DSIZE, 1)); // Prologue, header with no payload
+    PUT(heap_listp + (2*WSIZE), PACK(DSIZE, 1)); // Prologue footer with no payload
+    PUT(heap_listp + (3*WSIZE), PACK(0, 1)); 	 // Epilogue, just a header
+    heap_listp += (2*WSIZE);	// Point heap pointer to area between Prologue and Epilogue
 
+    /* Extend heap with free block of CHUNKSIZE bytes */
+
+    if (extend_heap(CHUNKSIZE/WSIZE) == NULL) 
+      return -1;
     return 0;
+
 }
+
+/*
+ * extend_heap - Extends heap with new free block
+ */
+static void* extend_heap(size_t words) 
+{
+    char *ptr;
+    // Size_t = integer type of at least 16 bytes
+    size_t size;
+
+    // If words is odd, add 1 to allocate even number of words
+    if (words%2) {
+      size = (words+1) * WSIZE;
+    } 
+    else  {
+      size = words * WSIZE;
+    } 
+
+    // Check that start address of extended heap is valid
+    if ((long)(ptr = mem_sbrk(size)) == -1)
+      return NULL;
+
+    /* Initialize free block header/footer and epilogue header */
+    PUT(HDRP(ptr), PACK(size, 0));   // Unallocated free block header at size location
+    PUT(FTRP(ptr), PACK(size, 0));   // Unallocated free block footer at size location
+    PUT(HDRP(NEXT_BLKP(ptr)), PACK(0,1));  // New epilogue header
+
+    /* Coalesce if prev block was free */
+    return coalesce(ptr);
+    
+}
+
+/*
+ * mem_sbrk - Simple model of sbrk function. Extends heap by 
+ * 	incr bytes and returns start address of new area
+ * Is this included in mem_lib? Commented out
+ */
+void *mem_sbrk(int incr) 
+{
+    char *old_brk = mem_brk;
+    
+    if ((incr < 0) || ((mem_brk + incr) > mem_max_addr)) {
+      errno = ENOMEM;
+      fprintf(stderr, "ERROR: mem_sbrk failed. No memory left!\n");
+      return (void *)-1;
+    }
+    mem_brk += incr;
+
+    // Does not support shrinking heap!
+
+    return (void *)old_brk;
+}
+
 
 /* 
  * mm_malloc - Allocate a block by incrementing the brk pointer.
  *     Always allocate a block whose size is a multiple of the alignment.
  *     Return 8-byte aligned pointers
  */
-void *mm_malloc(size_t size)
+void* mm_malloc(size_t size)
 {
+
+   /*
     int newsize = ALIGN(size + SIZE_T_SIZE);
+    // Grows the heap by adding to kernel's brk pointer
     void *p = mem_sbrk(newsize);
     if (p == (void *)-1)
 	return NULL;
@@ -73,6 +179,34 @@ void *mm_malloc(size_t size)
         *(size_t *)p = size;
         return (void *)((char *)p + SIZE_T_SIZE);
     }
+    */
+
+    // Below, from pg 834
+    size_t asize; 	// Adjusted block size
+    size_t extendsize; 	// Amount to extend heap if no fit
+    char *ptr;
+
+    // Ignore spurious requests
+    if (size == 0) return NULL;
+
+    // Adjust block size to include overhead/alignment reqs
+    if (size <= DSIZE) asize = 2*DSIZE;
+    else 
+      asize = DSIZE * ((size + (DSIZE) + (DSIZE-1)) / DSIZE);
+
+    // Search free list for a fit
+    if ((ptr = find_fit(asize)) != NULL) {
+      place(ptr, asize);
+      return ptr;
+    }
+
+    // No fit found, get more memory and place block
+    extendsize = MAX(asize, CHUNKSIZE);
+    if ((ptr = extend_heap(extendsize/WSIZE)) == NULL)
+      return NULL;
+    place(ptr, asize);
+    return ptr;
+
 }
 
 /*
@@ -81,12 +215,54 @@ void *mm_malloc(size_t size)
  */
 void mm_free(void *ptr)
 {
+    size_t size = GET_SIZE(HDRP(ptr));
+
+    PUT(HDRP(ptr), PACK(size, 0));
+    PUT(FTRP(ptr), PACK(size, 0));
+    coalesce(ptr);
+}
+
+/*
+ * coalesce - Merge free block with any adjacent free blocks
+ */
+static void* coalesce(void *ptr)
+{
+    size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(ptr)));
+    size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(ptr)));
+    size_t size = GET_SIZE(HDRP(ptr));
+
+    if (prev_alloc && next_alloc) {
+      return ptr;
+    }
+
+    else if (prev_alloc && !next_alloc) {
+      size += GET_SIZE(HDRP(NEXT_BLKP(ptr)));
+      PUT(FTRP(ptr), PACK(size, 0));
+      PUT(FTRP(ptr), PACK(size, 0));
+    }
+
+    else if (!prev_alloc && next_alloc) {
+      size += GET_SIZE(HDRP(PREV_BLKP(ptr)));
+      PUT(FTRP(ptr), PACK(size, 0));
+      PUT(HDRP(PREV_BLKP(ptr)), PACK(size, 0));
+      ptr = PREV_BLKP(ptr);
+    }
+
+    else {
+      size += GET_SIZE(HDRP(PREV_BLKP(ptr))) + 
+          GET_SIZE(FTRP(NEXT_BLKP(ptr)));
+      PUT(HDRP(PREV_BLKP(ptr)), PACK(size, 0));
+      PUT(FTRP(NEXT_BLKP(ptr)), PACK(size, 0));
+      ptr = PREV_BLKP(ptr);
+    }
+    return ptr;
 }
 
 /*
  * mm_realloc - Implemented simply in terms of mm_malloc and mm_free
+ * Change size of previously allocated block
  */
-void *mm_realloc(void *ptr, size_t size)
+void* mm_realloc(void *ptr, size_t size)
 {
     void *oldptr = ptr;
     void *newptr;
@@ -107,9 +283,9 @@ void *mm_realloc(void *ptr, size_t size)
 }
 
 
-/*
- * mm_check(void) - Checks heap for consistency
- */
+/* TODO
+ * mm_check - Checks heap for consistency
+ 
 int mm_check(void)
 {
   // Is every block in free list marked as free?
@@ -134,13 +310,53 @@ int mm_check(void)
   return 1;
 
 }
+*/
 
 
+/* TODO
+ * find_fit - Perform first-fit search of implicit free list
+ * See pg 827
+ * THIS IS NOT DONE!
+ 
+static void *find_fit(size_t size) 
+{
+    char* iter; 
+    iter = heap_listp;
+
+    // While iter exists 
+    while(GET_ALLOC(iter) != 0) {
+
+      iter = NEXT_BLKP(iter);
+    }
+
+      // If no space, extend heap for fit
+      if (iter == NULL) {
+        return extend_heap(size);
+     
+    // If 
+   
+    // If size of free block is too small
+    if (GET_ALLOC(heap_listp) == 1 && (GET_SIZE(heap_listp) < size)) {
+      
+    }
+}
+*/
+
+/* TODO - pg 834
+ * place - place requested block at beginning of free block splitting
+ * only if size of remainder >= minimum block size
+ *
+static void place(void *ptr, size_t asize) 
+{
 
 
+    // If remaining free area >= minimum block size
+    
 
+    // Else 
 
-
-
+    
+}
+*/
 
 
