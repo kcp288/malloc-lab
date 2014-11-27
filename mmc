@@ -83,6 +83,7 @@ static void* coalesce(void *ptr);
 void* mm_realloc(void *ptr, size_t size);
 static void *find_fit(size_t size);
 static void place(void *ptr, size_t size);
+int mm_check(void);
 
 /* Private global variables */
 static char *heap_listp; // Points to first byte in heap
@@ -97,19 +98,22 @@ static char *mem_max_addr; // Max legal heap addr +1
 */
 int mm_init(void)
 {
+    printf("mm_init entered\n");
     if ((heap_listp = mem_sbrk(4*WSIZE)) == (void *)-1)
        return -1;
 
     PUT(heap_listp, 0); // Padding to double-word boundary
+    printf("boundary\n");
     PUT(heap_listp + (1*WSIZE), PACK(DSIZE, 1)); // Prologue, header with no payload
     PUT(heap_listp + (2*WSIZE), PACK(DSIZE, 1)); // Prologue footer with no payload
     PUT(heap_listp + (3*WSIZE), PACK(0, 1)); // Epilogue, just a header
     heap_listp += (2*WSIZE); // Point heap pointer to area between Prologue and Epilogue
   
+    mm_check();
     /* Extend heap with free block of CHUNKSIZE bytes */
     if (extend_heap(CHUNKSIZE/WSIZE) == NULL)
         return -1;
-  
+
     return 0;
 }
 
@@ -136,11 +140,17 @@ static void* extend_heap(size_t words)
         return NULL;
     
     /* Initialize free block header/footer and epilogue header */
-    PUT(HDRP(ptr), PACK(size, 0)); // Unallocated free block header at size location
-    PUT(FTRP(ptr), PACK(size, 0)); // Unallocated free block footer at size location
+    // Trying to make hdrp at correct spot
+    ptr = (char *)ptr + WSIZE;
+
+    PUT(HDRP(ptr), PACK(size-2*WSIZE, 0)); // Unallocated free block header at size location
+    PUT(FTRP(ptr), PACK(size-2*WSIZE, 0)); // Unallocated free block footer at size location
     PUT(HDRP(NEXT_BLKP(ptr)), PACK(0,1)); // New epilogue header
    
     /* Coalesce if prev block was free */
+    printf("Check w/i extend heap\n");
+    mm_check();
+    printf("Printing\n");
     return coalesce(ptr);
 }
 
@@ -150,7 +160,7 @@ static void* extend_heap(size_t words)
 * mem_sbrk - Simple model of sbrk function. Extends heap by
 * incr bytes and returns start address of new area
 * Is this included in mem_lib? Commented out
-*/
+
 void *mem_sbrk(int incr)
 {
     char *old_brk = mem_brk;
@@ -165,7 +175,7 @@ void *mem_sbrk(int incr)
     // Does not support shrinking heap!
     return (void *)old_brk;
 }
-
+*/
 
 
 /*
@@ -186,7 +196,7 @@ void* mm_malloc(size_t size)
         return (void *)((char *)p + SIZE_T_SIZE);
     }
     */
-
+    printf("malloc entered\n");
 
     // Below, from pg 834
     size_t asize; // Adjusted block size
@@ -200,6 +210,7 @@ void* mm_malloc(size_t size)
         asize = DSIZE * ((size + (DSIZE) + (DSIZE-1)) / DSIZE);
     // Search free list for a fit
     if ((ptr = find_fit(asize)) != NULL) {
+	printf("Malloc_ptr: %p\n", (void *)ptr);
         place(ptr, asize);
         return ptr;
     }
@@ -221,6 +232,7 @@ void* mm_malloc(size_t size)
 */
 void mm_free(void *ptr)
 {
+    printf("free entered\n");
     size_t size = GET_SIZE(HDRP(ptr));
     PUT(HDRP(ptr), PACK(size, 0));
     PUT(FTRP(ptr), PACK(size, 0));
@@ -234,6 +246,7 @@ void mm_free(void *ptr)
 */
 static void* coalesce(void *ptr)
 {
+    printf("coalesce entered\n");
     size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(ptr)));
     size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(ptr)));
     size_t size = GET_SIZE(HDRP(ptr));
@@ -269,6 +282,7 @@ static void* coalesce(void *ptr)
 */
 void* mm_realloc(void *ptr, size_t size)
 {
+    printf("realloc entered \n");
     void *oldptr = ptr;
     void *newptr;
     size_t copySize;
@@ -290,9 +304,24 @@ void* mm_realloc(void *ptr, size_t size)
 
 /* TODO
 * mm_check - Checks heap for consistency
+*/
 int mm_check(void)
 {
-// Is every block in free list marked as free?
+// Do hdr/ftr match?
+  void *ptr;
+  for(ptr = heap_listp; GET_SIZE(HDRP(ptr)) > 0; ptr = NEXT_BLKP(ptr)){
+    printf("Checking %p ptr/n", ptr);
+    if (GET_ALLOC(HDRP(ptr)) != GET_ALLOC(FTRP(ptr))) {
+      printf("Alloc bits don't match!");
+      //exit(1);
+    }
+    if (GET_SIZE(HDRP(ptr)) != GET_SIZE(FTRP(ptr))) {
+      printf("Size bits don't match!");
+      //exit(1);
+    }
+  }
+
+        
 // Are there any contiguous free blocks that are not coalesced?
 // Is every free block in free list?
 // Do pointers in free list point to valid free blocks?
@@ -301,30 +330,6 @@ int mm_check(void)
 // If it's all good in the hood
 return 1;
 }
-*/
-
-/* TODO
-* find_fit - Perform first-fit search of implicit free list
-* See pg 827
-* THIS IS NOT DONE!
-static void *find_fit(size_t size)
-{
-    char* iter;
-    iter = heap_listp;
-    
-    // While iter exists
-    while(GET_ALLOC(iter) != 0) {
-        iter = NEXT_BLKP(iter);
-    }
-    // If no space, extend heap for fit
-    if (iter == NULL) {
-        return extend_heap(size);
-    // If
-    // If size of free block is too small
-    if (GET_ALLOC(heap_listp) == 1 && (GET_SIZE(heap_listp) < size)) {
-    }
-}
-*/
 
 
 /*
@@ -334,40 +339,51 @@ static void *find_fit(size_t size)
 
  static void *find_fit(size_t asize)
  {
+    printf("find fit entered\n");
     void *ptr;
     for(ptr = heap_listp; GET_SIZE(HDRP(ptr)) > 0; ptr = NEXT_BLKP(ptr)){
-        if (!GET_ALLOC(HDRP(ptr)) && (asize <= GET_SIZE(HDRP(ptr))))
+	printf("Alloc bit: %d ", GET_ALLOC(HDRP(ptr)));       
+	if (!GET_ALLOC(HDRP(ptr)) && (asize <= GET_SIZE(HDRP(ptr)))){
+	  printf("Pointer: %p\n", (void *)ptr);
           return ptr;
+	}
     }
   
     return NULL; 
 }
 
-
-
-
 /* TODO
 *
 * page 856-7
 * place - place requested block at beginning of free block splitting
-*	
+*   
 * only if size of remainder >= minimum block size
 */
 static void place(void *ptr, size_t asize)
 {
+    mm_check();
+    printf("wutwut");
+    printf("place entered, Pointer %p\n", ptr);
+    printf("\tplace entered, Hdrp %p\n", (void *)HDRP(ptr));
+
     size_t copySize = GET_SIZE(HDRP(ptr));
+    printf("post size_t");
 
-  	// If remaining free area >= minimum block size
-  	if ((copySize - asize) >= (2*DSIZE)){
-    		PUT(HDRP(ptr), PACK(asize,1));
-    		PUT(FTRP(ptr), PACK(asize,1));
-    		ptr = NEXT_BLKP(ptr);
-    		PUT(HDRP(ptr), PACK(copySize-asize,0));
-    		PUT(FTRP(ptr), PACK(copySize-asize,0));
-  	}
-  	else{
-    		PUT(HDRP(ptr), PACK(copySize, 1));
-    		PUT(HDRP(ptr), PACK(copySize, 1));
-  	}
-
+    // If remaining free area >= minimum block size
+    if ((copySize - asize) >= (2*DSIZE)){
+            printf("entered if");
+            PUT(HDRP(ptr), PACK(asize,1));
+            PUT(FTRP(ptr), PACK(asize,1));
+            void * next_ptr = NEXT_BLKP(ptr);
+	    printf("set next ptr");
+            PUT(HDRP(next_ptr), PACK(copySize-asize,0));
+            PUT(FTRP(next_ptr), PACK(copySize-asize,0));
+    }
+    else{
+	    printf("in the else statement");
+            PUT(HDRP(ptr), PACK(copySize, 1));
+            PUT(FTRP(ptr), PACK(copySize, 1));
+    }
+    printf("\nMemory placed: \n\tHeader: %p\n, \tData: %p\n, \tFooter: %p\n\n", 
+                (void *)HDRP(ptr), (void *)ptr, (void *)FTRP(ptr));
 }
